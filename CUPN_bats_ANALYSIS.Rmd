@@ -1,0 +1,403 @@
+---
+title: "CUPN bats - Proposed analysis of 2016-2018 data"
+author: Ellen Cheng
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    df_print: kable
+    fig_caption: yes
+    highlight: haddock
+    keep_md: yes
+    smart: no
+    theme: journal
+    number_sections: yes
+    toc: yes
+    toc_float: 
+      collapse: true
+    toc_depth: 3
+  html_notebook:
+    chunk_output_type: inline
+  word_document:
+    toc: yes
+    toc_depth: 3
+  pdf_document:
+    df_print: kable
+    highlight: haddock
+    fig_caption: yes
+    keep_tex: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+editor_options: 
+  chunk_output_type: console
+---
+```{r setup, include=FALSE}
+rm(list=ls())
+
+pkgs <- c("magrittr", "lubridate", "tidyverse", "lme4", "sjPlot", "rstan", "brms", "broom", "tidybayes")
+installed_pkgs <- pkgs %in% installed.packages()
+if (length(pkgs[!installed_pkgs]) > 0) install.packages(pkgs[!installed_pkgs],dep=TRUE) 
+lapply(pkgs, library, character.only = TRUE)
+
+rstan_options (auto_write=TRUE)
+options (mc.cores=parallel::detectCores ()) # Run chains on multiple cores
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, out.width = "100%", cache = FALSE, tidy = TRUE)
+
+# Read in final data
+df_final <- readRDS(here::here("Data_out", "df_final.RDS")) # maxem etc., summarized to survey event
+df_event_cov <- readRDS(here::here("Data_out", "df_event_cov.RDS"))
+df_multi_entrance <- readRDS(here::here("Data_out", "df_multi_entrance.RDS"))
+```
+
+```{r functions, include = FALSE}
+
+FuncPlotCavesOne <- function(func_dat, color_by = "method") {
+  # Function to plot counts by cave
+  #
+  # Args:
+  #   func_dat: The entrance totals data for a single cave
+  #   color_by: The variable to color points by
+  #
+  # Returns:
+  #   List of point plots
+  #
+  
+  func_dat %<>% 
+    dplyr::rename(color_col = all_of(color_by)) %>%
+    droplevels()
+  
+  if(length(unique(func_dat$color_col)) <= 8) {
+    plot_colors <- ggthemes::scale_color_colorblind(name = all_of(color_by), limits = sort(unique(func_dat$color_col)))
+  } else {
+    plot_colors <- scale_color_viridis_d(all_of(color_by))
+  }
+  
+  p <- ggplot(data = func_dat, aes(x = event_date, y = summary_maxem, group = color_col, label = surveyor, label3 = data_quality, label4 = has_data_entry_flag, label5 = infrared_light_used, label6 = human_disturbance, label7 = weather, label8 = wind_strength)) +
+    coord_cartesian(clip = "off") +
+    geom_jitter(aes(shape = total_duration==75, color = color_col), alpha = 0.6, size = 3, height = 0) +
+    geom_line(aes(group = event_date), linetype = "dotted") +
+    scale_x_date(breaks = seq(lubridate::ymd(paste0(min(func_dat$yr, na.rm = TRUE), "01-01")), lubridate::ymd(paste0(max(func_dat$yr, na.rm = TRUE), "12-31")), "quarters"), limits = c(lubridate::ymd(paste0(min(func_dat$yr, na.rm = TRUE), "01-01")), lubridate::ymd(paste0(max(func_dat$yr, na.rm = TRUE), "12-31")))) +
+    scale_y_continuous(breaks= scales::pretty_breaks(), limits = c(0, NA)) +
+    expand_limits(y = c(0, 10)) + # y-axis maximum must be 10 or higher
+    labs(x = "\nSurvey Date", y = "Maximum Emergence Count\n", title = paste0("Maximum Emergence Counts for ", unique(func_dat$cave), ", by Entrance"), subtitle = "Filled circles are full survey counts; open circles include missing intervals; vertical lines connect same date") +
+    plot_colors + 
+    scale_shape_manual(values = c("FALSE" = 1, "TRUE" = 16), guide = "none") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle=90)) 
+  
+  if(unique(func_dat$cave) %in% df_multi_entrance$cave) {
+    p <- p +
+      facet_grid(entrance ~ .,)
+  }
+  
+  p <- plotly::ggplotly(p)
+  return(p)
+}
+
+```
+
+# Some points about N-mixture models (relevant to current bats data)
+
+N-mixture models assume there is some true number of bats in a cave and only some fraction of the true number is detected by observers. The models use spatially and temporally replicated counts to estimate the probability of detection (p), with the possibility of including covariates (e.g., method, observer, weather conditions, etc.) on the detection parameter. When probability of detection can be estimated appropriately, that information can then be used to estimate true number of bats at a cave, given an assumed abundance distribution. Typically, spatial replicates would be used to estimate an abundance distribution, e.g., some mean number of bats across all caves, and some measure of the variability in bat abundance across caves--with the possibility of including covariates (e.g., cave size, cave conditions, habitat surrounding cave) on the abundance parameter.
+
+N-mixture models cannot be reliably fit to the cave bat emergence data for two (main) reasons:
+
+1. We don't have replicate counts for estimating detection probability. Counts across difference inferences (i.e., methods, observers, nights) cannot be considered true replicates. IF the number of bats exiting a cave were similar across nights within a survey window, we could potentially consider the data as having temporal replicates (if we could disentangle the effects of methods and observers across nights)--but we can see from the data that there can be quite a lot of (unmodeled) heterogneity in the number of bats emerging each night within a sampling window, so each survey night would actually need a separate estimate of detection probability ("detection" meaning the number of bats in the cave that could be detected because they emerged). Even small amounts of unmodeled heterogeneity can greatly bias population estimates from N-mixture models.
+
+2. When the number of bats emerging is in the hundreds or even thousands, the emergence estimates can be overestimates of the number of bats observed just as much as they can be underestimates. That is, the probability of false positives (over-estimating the number of bats that emerged) can not be considered negligible, and therefore a key assumption of N-mixture models cannot be met.
+
+Therefore, instead of N-mixture models to estimate status and trends in ABSOLUTE abundance, consider a general linear mixed model to estimate status and trends in RELATIVE abundance. 
+
+These two papers provide some useful (and relevant to the bats data) information about N-mixture models: 
+
+Barker RJ, Schofield MR, Link WA, Sauer JR. 2018. On the reliability of N-mixture models for count data. Biometrics 74(1):369-377. doi: 10.1111/biom.12734. Epub 2017 Jul 3. PMID: 28672424.
+
+Duarte A, Adams MJ, Peterson JT. 2018. Fitting N-mixture models to count data with unmodeled heterogeneity: Bias, diagnostics, and alternative approaches. Ecological Modelling 374: 51-59. ISSN 0304-3800. https://doi.org/10.1016/j.ecolmodel.2018.02.007.
+
+NOTE: I consulted Tom Philippi, Thomas Rodhouse, and Richard Chandler to see if they had ideas on how N-mixture models could be reliably applied to the bats data (Richard Chandler is one of the creators of the R 'unmarked' package for analyzing data with N-mixture models). They did not have suggestions for how N-mixture models can be reliably applied to these data.
+
+# Examples of GLMMs to analyze trends in RELATIVE abundance
+
+In the examples below, I provide initial estimates of trends in relative abundance, using GLMMs on data from a subset of single-entrance caves with annual surveys. These initial analyses use full surveys (survey duration = 75 min.) rated as "good" data quality. In addition, the data for each cave are limited to surveys conducted within a similar time period across all survey years. That is, if Luna Cave is typically surveyed in June, then analysis is limited to surveys conducted in June.
+
+For all of these caves I compared the basic model (year as a fixed effect, survey night as a random effect) with alternative models that included covariates as predictors (e.g., method, wind_condition, etc.). The basic model was identified as the best-supported in all cases, so that is the model presented here.
+
+```{r eval = FALSE}
+# Subset the data for initial analyses. These are the single-entrance caves with annual surveys. Only including data where data quality = "good"
+
+# Exclude Cathedral Cave from this subset because average maxem < 1 bat
+
+subcaves1 <- c("Blight Cave", "Coke Cave", "Colossal Entrance", "Dixon Cave", "Dynamite Rock Cave", "Historic Entrance", "Lee Cave", "Long Cave", "Luna Cave", "Misty Hole Cave") # turns out these are all MACA caves
+
+tempdat1 <- df_final %>%
+  dplyr::filter(cave %in% subcaves1)
+
+# Initially, limit trend analysis to surveys conducted within a similar span of yr_day. This means omitting some 2016 data for MACA caves Luna (limit to yr_day 154 - 161), Historic (limit to 187 - 200, there wasn't a good 2016 yday match), and Long (187 - 200) --but it would be useful to also analyze with all the data and compare results
+(df_range_yr_day <- tempdat1 %>%
+  dplyr::group_by(park, cave) %>%
+  dplyr::summarize(
+    range_yr_day = paste0(min(yr_day, na.rm = TRUE), " - ", max(yr_day, na.rm = TRUE)),
+    diff_yr_day = max(yr_day, na.rm = TRUE) - min(yr_day, na.rm = TRUE) +1,
+    range_yr = paste0(min(yr, na.rm = TRUE), " - ", max(yr, na.rm = TRUE))
+  ))
+
+subdat1 <- tempdat1 %>%
+  dplyr::filter(
+    !(cave == "Luna Cave" & (yr_day < 154 | yr_day > 161)),
+    !(cave == "Long Cave" & (yr_day < 187 | yr_day > 200)),
+    !(cave == "Historic Entrance" & (yr_day < 187 | yr_day > 200))
+  ) %>%
+  dplyr::mutate(
+    method = factor(method, levels = c("night_vision_goggles", "night_vision_camera", "thermal_infrared_camera")),
+    unique_event = factor(event_date)) %>%
+  droplevels() %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(cave, event_date, method)
+
+saveRDS(subdat1, here::here("Data_out", "subdat1.RDS"))
+```
+
+```{r}
+subdat1 <- readRDS(here::here("Data_out", "subdat1.RDS"))
+```
+
+## Blight Cave
+```{r}
+
+i = "Blight Cave"
+  mod_dat <- subdat1 %>%
+  dplyr::filter(cave == i) %>%
+  dplyr::mutate(yr_base = yr - min(yr, na.rm = TRUE))
+
+
+# Proportion incomplete surveys
+# round(sum(mod_dat$total_duration <75)/nrow(mod_dat), 2)
+# table(mod_dat$total_duration) 
+
+FuncPlotCavesOne(mod_dat, color_by = "method") # Get an idea of trend and also how many surveys are incomplete (open circles, meaning missing intervals)
+```
+
+### Model estimates
+```{r}
+mod_dat %<>% 
+  dplyr::filter(total_duration == 75)
+
+m0_brm <- brm(
+  summary_maxem ~ yr_base + (1|unique_event),
+  data = mod_dat, 
+  family = poisson,
+  iter = 4000, warmup = 1000, chains = 4, cores = 4,
+  file = here::here("Model_fits", paste0(stringr::word(i), "_m0"))
+)
+
+best_mod = m0_brm 
+summary(best_mod) # slightly shorter summary of model results
+```
+
+### Coefficient plot
+```{r}
+mcmc_plot(best_mod) # quick coefficient plot
+```
+
+### Model convergence check
+```{r}
+plot(best_mod) # plots showing posterior distribution of parameters, and trace plots
+```
+
+### Model-estimated trend with 95%CI
+```{r}
+conditional_effects(best_mod)
+```
+
+## Historic Entrance
+```{r}
+
+i = "Historic Entrance"
+  mod_dat <- subdat1 %>%
+  dplyr::filter(cave == i) %>%
+  dplyr::mutate(yr_base = yr - min(yr, na.rm = TRUE))
+
+
+# Proportion incomplete surveys
+# round(sum(mod_dat$total_duration <75)/nrow(mod_dat), 2)
+# table(mod_dat$total_duration) 
+
+FuncPlotCavesOne(mod_dat, color_by = "method") # Get an idea of trend and also how many surveys are incomplete (open circles, meaning missing intervals)
+```
+
+### Model estimates
+```{r}
+mod_dat %<>% 
+  dplyr::filter(total_duration == 75)
+
+m0_brm <- brm(
+  summary_maxem ~ yr_base + (1|unique_event),
+  data = mod_dat, 
+  family = poisson,
+  iter = 4000, warmup = 1000, chains = 4, cores = 4,
+  file = here::here("Model_fits", paste0(stringr::word(i), "_m0"))
+)
+
+best_mod = m0_brm 
+summary(best_mod) # slightly shorter summary of model results
+```
+
+### Coefficient plot
+```{r}
+mcmc_plot(best_mod) # quick coefficient plot
+```
+
+### Model convergence check
+```{r}
+plot(best_mod) # plots showing posterior distribution of parameters, and trace plots
+```
+
+### Model-estimated trend with 95%CI
+```{r}
+conditional_effects(best_mod)
+```
+
+## Lee Cave
+```{r}
+
+i = "Lee Cave"
+  mod_dat <- subdat1 %>%
+  dplyr::filter(cave == i) %>%
+  dplyr::mutate(yr_base = yr - min(yr, na.rm = TRUE))
+
+
+# Proportion incomplete surveys
+# round(sum(mod_dat$total_duration <75)/nrow(mod_dat), 2)
+# table(mod_dat$total_duration) 
+
+FuncPlotCavesOne(mod_dat, color_by = "method") # Get an idea of trend and also how many surveys are incomplete (open circles, meaning missing intervals)
+```
+
+### Model estimates
+```{r}
+mod_dat %<>% 
+  dplyr::filter(total_duration == 75)
+
+m0_brm <- brm(
+  summary_maxem ~ yr_base + (1|unique_event),
+  data = mod_dat, 
+  family = poisson,
+  iter = 4000, warmup = 1000, chains = 4, cores = 4,
+  file = here::here("Model_fits", paste0(stringr::word(i), "_m0"))
+)
+
+best_mod = m0_brm 
+summary(best_mod) # slightly shorter summary of model results
+```
+
+### Coefficient plot
+```{r}
+mcmc_plot(best_mod) # quick coefficient plot
+```
+
+### Model convergence check
+```{r}
+plot(best_mod) # plots showing posterior distribution of parameters, and trace plots
+```
+
+### Model-estimated trend with 95%CI
+```{r}
+conditional_effects(best_mod)
+```
+
+## Long Cave
+```{r}
+
+i = "Long Cave"
+  mod_dat <- subdat1 %>%
+  dplyr::filter(cave == i) %>%
+  dplyr::mutate(yr_base = yr - min(yr, na.rm = TRUE))
+
+
+# Proportion incomplete surveys
+# round(sum(mod_dat$total_duration <75)/nrow(mod_dat), 2)
+# table(mod_dat$total_duration) 
+
+FuncPlotCavesOne(mod_dat, color_by = "method") # Get an idea of trend and also how many surveys are incomplete (open circles, meaning missing intervals)
+```
+
+### Model estimates
+```{r}
+mod_dat %<>% 
+  dplyr::filter(total_duration == 75)
+
+m0_brm <- brm(
+  summary_maxem ~ yr_base + (1|unique_event),
+  data = mod_dat, 
+  family = poisson,
+  iter = 4000, warmup = 1000, chains = 4, cores = 4,
+  file = here::here("Model_fits", paste0(stringr::word(i), "_m0"))
+)
+
+best_mod = m0_brm 
+summary(best_mod) # slightly shorter summary of model results
+```
+
+### Coefficient plot
+```{r}
+mcmc_plot(best_mod) # quick coefficient plot
+```
+
+### Model convergence check
+```{r}
+plot(best_mod) # plots showing posterior distribution of parameters, and trace plots
+```
+
+### Model-estimated trend with 95%CI
+```{r}
+conditional_effects(best_mod)
+```
+
+## Misty Hole Cave
+```{r}
+
+i = "Misty Hole Cave"
+  mod_dat <- subdat1 %>%
+  dplyr::filter(cave == i) %>%
+  dplyr::mutate(yr_base = yr - min(yr, na.rm = TRUE))
+
+
+# Proportion incomplete surveys
+# round(sum(mod_dat$total_duration <75)/nrow(mod_dat), 2)
+# table(mod_dat$total_duration) 
+
+FuncPlotCavesOne(mod_dat, color_by = "method") # Get an idea of trend and also how many surveys are incomplete (open circles, meaning missing intervals)
+```
+
+### Model estimates
+```{r}
+mod_dat %<>% 
+  dplyr::filter(total_duration == 75)
+
+m0_brm <- brm(
+  summary_maxem ~ yr_base + (1|unique_event),
+  data = mod_dat, 
+  family = poisson,
+  iter = 4000, warmup = 1000, chains = 4, cores = 4,
+  file = here::here("Model_fits", paste0(stringr::word(i), "_m0"))
+)
+
+best_mod = m0_brm 
+summary(best_mod) # slightly shorter summary of model results
+```
+
+### Coefficient plot
+```{r}
+mcmc_plot(best_mod) # quick coefficient plot
+```
+
+### Model convergence check
+```{r}
+plot(best_mod) # plots showing posterior distribution of parameters, and trace plots
+```
+
+### Model-estimated trend with 95%CI
+```{r}
+conditional_effects(best_mod)
+```

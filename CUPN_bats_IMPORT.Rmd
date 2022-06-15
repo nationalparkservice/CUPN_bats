@@ -1,0 +1,244 @@
+---
+title: "CUPN bats - EDA of 2016-2021 data"
+author: Ellen Cheng
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    df_print: kable
+    fig_caption: yes
+    highlight: haddock
+    keep_md: yes
+    smart: no
+    theme: journal
+    number_sections: yes
+    toc: yes
+    toc_float: 
+      collapse: true
+    toc_depth: 3
+  html_notebook:
+    chunk_output_type: inline
+  word_document:
+    toc: yes
+    toc_depth: 3
+  pdf_document:
+    df_print: kable
+    highlight: haddock
+    fig_caption: yes
+    keep_tex: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+---
+```{r setup, include = FALSE}
+rm(list=ls())
+
+pkgs <- c("readr", "tidyverse", "here", "janitor", "magrittr", "lubridate")
+installed_pkgs <- pkgs %in% installed.packages()
+if (length(pkgs[!installed_pkgs]) > 0) install.packages(pkgs[!installed_pkgs],dep=TRUE) 
+lapply(pkgs, library, character.only = TRUE)
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, out.width = "100%", cache = FALSE, tidy = TRUE)
+```
+
+```{r functions, include = FALSE}
+FuncImport <- function(filenam) {
+  read_csv(here::here("Data_in", filenam)) %>%
+    janitor::clean_names("snake") %>%
+    dplyr::mutate(event_date = lubridate::mdy(event_date),
+                  across(c("interval_number", "interval_duration"), as.integer),
+                  across(contains(c("person")), as.character),
+                  across(ends_with(c("entry", "exit")), as.integer))
+}
+
+FuncMetrics <- function(dat) {
+  # Function to calculate metrics and put results in long format
+  #
+  # Args:
+  #   dat:  The raw data in wide format
+  # Returns:
+  #   Formatted data with three calculated metrics. Method names should not be distinguished by the observer--instead, a separate column for method and observer. One count per record. Remove records with NA for both Exit and Entry count
+  dat$interval_start_time[dat$interval_start_time == "Unknown"] <- NA # if start time is unknown, convert to NA so can assign time class to that column
+  
+  cols_df <- data.frame(
+    rbind(
+      c("night_vision_goggles", "night_vision_goggles_1_exit", "night_vision_goggles_1_entry", "method_person_night_vision_goggles_1"),
+      c("night_vision_goggles", "night_vision_goggles_2_exit", "night_vision_goggles_2_entry", "method_person_night_vision_goggles_2"),
+      c("night_vision_camera", "night_vision_video_camera_1_exit", "night_vision_video_camera_1_entry", "method_person_night_vision_video_camera_1"),
+      c("night_vision_camera", "night_vision_video_camera_2_exit", "night_vision_video_camera_2_entry", "method_person_night_vision_video_camera_2"),
+      c("thermal_infrared_camera", "thermal_infrared_camera_1_exit", "thermal_infrared_camera_1_entry", "method_person_thermal_infrared_camera_1"),
+      c("thermal_infrared_camera", "thermal_infrared_camera_2_exit", "thermal_infrared_camera_2_entry", "method_person_thermal_infrared_camera_2")
+    )
+  )
+  colnames(cols_df) <- c("meth_name", "exit_col", "entry_col", "surveyor_col")
+  
+  FuncCalcs <- function(dat, meth_name, exit_col, entry_col, surveyor_col) {
+    
+    df_temp <- dat %>%
+      dplyr::filter(!is.na(get(exit_col)) | !is.na(get(entry_col))) %>% # exclude records with NA for both Exit and Entry counts
+      dplyr:: mutate_at(c(exit_col, entry_col), ~replace(., is.na(.), 0)) # if one of these has a number and the other has NA, replace the NA with 0
+    
+    df_temp$interval_start_time[df_temp$interval_start_time == "Unknown"] <- NA
+    
+    df_long <- df_temp %>%
+      dplyr::select(park, cave, entrance, event_date, surveyor = matches(surveyor_col), interval_number, interval_start_time, interval_duration, exit_count = all_of(exit_col), entry_count = all_of(entry_col)) %>%
+      dplyr::mutate(
+        method = meth_name,
+        unique_count = paste(cave, entrance, event_date, method, surveyor, sep = "_"),
+        net_count = exit_count - entry_count
+      ) %>%
+      dplyr::select(park, cave, entrance, event_date, method, surveyor, unique_count, interval_number, interval_start_time, interval_duration, exit_count, entry_count, net_count)
+      
+    
+    df_summary <- df_temp %>%
+      dplyr::group_by(park, cave, event_date, entrance) %>%
+      dplyr::summarize(
+        survey_start_time = switch(all(is.na(interval_start_time))+1, min(chron::times(format(strptime(interval_start_time, "%I:%M:%S %p"), "%H:%M:%S")), na.rm = TRUE), NA),
+        surveyor = unique(get(surveyor_col)),
+        num_intervals = ifelse(all(is.na(get(exit_col))), NA, length(na.omit(interval_number))),
+        total_duration = ifelse(all(is.na(get(exit_col))), NA, sum(interval_duration, na.rm = TRUE)),
+        summary_exit = ifelse(all(is.na(get(exit_col))), NA, sum(get(exit_col), na.rm = TRUE)),
+        summary_entry = ifelse(all(is.na(get(entry_col))), NA, sum(get(entry_col), na.rm = TRUE)),
+        summary_net_exit = ifelse(all(is.na(get(exit_col)), is.na(get(entry_col))), NA, sum(get(exit_col), -get(entry_col), na.rm = TRUE)),
+        summary_maxem = ifelse(all(is.na(get(exit_col)), is.na(get(entry_col))), NA, cumsum((get(exit_col) -get(entry_col)) %>% replace_na(., 0)) %>% max())
+      ) %>%
+      dplyr::mutate(method = meth_name)
+    df_summary[df_summary == -Inf] <- NA # these are cases where all values were NA for all intervals
+    return_list = list(df_long = df_long, df_summary = df_summary)
+    return(return_list)
+  }
+  
+  
+  keep_rows <- apply(cols_df, MARGIN = 1, FUN = function(x) {
+    if(all(is.na(dat[[x[["exit_col"]]]]))) {
+      FALSE
+    } else {
+      TRUE
+    }
+  })
+  cols_df <- cols_df[keep_rows,]
+  
+  metrics_list <- apply(cols_df, MARGIN = 1, FUN = function(x) {
+    out <- FuncCalcs(dat = dat, meth_name = x[["meth_name"]], exit_col = x[["exit_col"]], entry_col = x[["entry_col"]], surveyor_col = x[["surveyor_col"]])
+    })
+    
+  
+  long_df <- do.call("rbind", sapply(metrics_list, '[', 1)) %>%
+    dplyr::mutate(
+      yr_day = as.integer(lubridate::yday(event_date)),
+      mnth = lubridate::month(event_date, label = TRUE, abbr = TRUE),
+      yr = as.integer(lubridate::year(event_date)))
+  
+  metrics_df <- do.call("rbind", sapply(metrics_list, '[', 2)) %>%
+    dplyr::mutate(
+      yr_day = as.integer(lubridate::yday(event_date)),
+      mnth = lubridate::month(event_date, label = TRUE, abbr = TRUE),
+      yr = as.integer(lubridate::year(event_date)))
+  return_list <- list(long_df = long_df, metrics_df = metrics_df)
+  return(return_list)
+}
+
+FuncImportCov <- function(filenam) {
+  # Clean individual survey covariate data prior to appending
+  #
+  # Args:
+  #   filenam:  location of the raw covariate data
+  # Returns:
+  #   Formatted data ready for combining
+  
+  dat <- read_csv(here::here("Data_in", filenam),
+           col_types = cols(DataQualityNotes = col_character(),
+                            StartDate = col_date(format = "%m/%d/%Y"),
+                            EventNotes = col_character(), 
+                            DataEntryNotes = col_character())) %>%
+    janitor::clean_names("snake") %>% 
+    dplyr::mutate(
+      method = case_when(
+        summer_bat_count_method_id == 1 ~ "night_vision_goggles",
+        summer_bat_count_method_id == 2 ~ "night_vision_camera",
+        summer_bat_count_method_id == 3 ~ "thermal_infrared_camera"),
+      start_weather_condition_id = dplyr::na_if(start_weather_condition_id, start_weather_condition_id == 8),
+      end_weather_condition_id = dplyr::na_if(end_weather_condition_id, end_wind_condition_id == 8),
+      weather = case_when(
+        start_weather_condition_id %in% 4:8|end_weather_condition_id %in% 4:8 ~ "fog/precipitation (4-8)",
+        start_weather_condition_id == 3|end_weather_condition_id == 3 ~ "cloudy/overcast (3)",
+        start_weather_condition_id %in% 1:2|end_weather_condition_id %in% 1:2 ~ "clear/some clouds (1-2)"
+        ),
+      human_disturbance_yes_no_id = dplyr::na_if(human_disturbance_yes_no_id, human_disturbance_yes_no_id == 4),
+      human_disturbance = case_when(
+        human_disturbance_yes_no_id == 1 ~ "yes",
+        human_disturbance_yes_no_id == 2 ~ "no"
+      ),
+      start_wind_condition_id = dplyr::na_if(start_wind_condition_id, start_wind_condition_id == 7),
+      end_wind_condition_id = dplyr::na_if(end_wind_condition_id, end_wind_condition_id == 7),
+      wind_strength = pmax(start_wind_condition_id, end_wind_condition_id, na.rm = TRUE),
+      infrared_light_used_yes_no_id = dplyr::na_if(infrared_light_used_yes_no_id, infrared_light_used_yes_no_id == 4),
+      infrared_light_used = case_when(
+        infrared_light_used_yes_no_id == 1 ~ "yes",
+        infrared_light_used_yes_no_id == 2 ~ "no"
+      ),
+      data_quality_flag_id = dplyr::na_if(data_quality_flag_id, data_quality_flag_id == 4),
+      data_quality = case_when(
+        data_quality_flag_id == 1 ~ "good (1)",
+        data_quality_flag_id == 2 ~ "questionable (2)",
+        data_quality_flag_id == 3 ~ "unreliable (3)"
+      ),
+      event_date = lubridate::ymd(start_date)
+    ) %>%
+    dplyr::rename(cave = location_name, entrance = entrance_name) %>%
+    dplyr::select(cave, entrance, event_date, event_notes, method, data_quality, data_quality_notes, has_data_entry_flag, data_entry_notes, infrared_light_used, human_disturbance, weather, wind_strength) %>%
+    distinct() %>%
+    dplyr::mutate(row_id = row_number())
+}
+
+```
+
+```{r import_format}
+### Import and format data ----
+
+# Read in data - NEW
+dat_raw <- FuncImport("2014-2021_Summer_Cave_Bats_507events.csv")
+temp_out <- FuncMetrics(dat = dat_raw)
+
+# Clean individual survey covariate data prior to appending
+df_cov <- FuncImportCov("qry_Rcov.csv")# >>>>>>>>>>>> RUN qry_Rcov in ACCESS DATABASE, TO GET THESE DATA!
+
+cov_dups <- df_cov %>% janitor::get_dupes(c(cave, entrance, method, event_date)) # find records duplicated for this subset of column names
+
+# I have to remove two particular instances of duplicated records <<<<<<<<<<<<<<<<<<<<<<<<<<<
+df_cov %<>%
+  filter(!row_id %in% c(130, 895))
+
+df_event_cov <- subset(df_cov, select = c("cave", "entrance", "event_date", "event_notes", "human_disturbance", "weather", "wind_strength", "infrared_light_used")) %>%
+  dplyr::distinct()
+
+# Make sure only one covariate record per cave-entrance-survey
+# Are there any duplicates?
+df_event_cov %>% dplyr::select(cave, entrance, event_date) %>% dplyr::add_count(cave, entrance, event_date) %>% dplyr::filter(n>1) %>% nrow(.)> 0
+
+# Entrance-Survey totals, with event-method-level covariates info added
+df_final <- temp_out$metrics_df %>%
+  dplyr::filter(yr >=2016) %>%
+  left_join(subset(df_cov, select = c("cave", "entrance", "event_date", "method",  "data_quality", "data_quality_notes", "has_data_entry_flag", "data_entry_notes", "infrared_light_used", "human_disturbance", "weather", "wind_strength")), by = c("cave", "entrance", "method", "event_date")) %>%
+  dplyr::filter(data_quality == "good (1)"|is.na(data_quality)) %>% # 88% (N=520 out of 593) of data were "good" or NA <<<<<<<<<<<<<<<<<
+  dplyr::ungroup()
+
+# Data in long format, summarized to interval
+df_long <- temp_out$long_df %>%
+  dplyr::filter(yr >=2016) %>%
+  left_join(subset(df_cov, select = c("cave", "entrance", "event_date", "method", "data_quality", "data_quality_notes", "has_data_entry_flag", "data_entry_notes", "infrared_light_used", "human_disturbance", "weather", "wind_strength")), by = c("cave", "entrance", "method", "event_date")) %>%
+  dplyr::filter(data_quality == "good (1)"|is.na(data_quality)) %>%
+  dplyr::ungroup()
+
+saveRDS(df_long, here::here("Data_out", "df_long.RDS"))
+saveRDS(df_final, here::here("Data_out", "df_final.RDS"))
+saveRDS(df_event_cov, here::here("Data_out", "df_event_cov.RDS"))
+
+df_multi_entrance <- df_final %>%
+    dplyr::select(park, cave, entrance) %>%
+    dplyr::distinct() %>%
+    dplyr::arrange(park, cave) %>%
+    dplyr::count(park, cave) %>%
+    dplyr::filter(n>1) %>% # these are the caves with multiple entrances
+  droplevels()
+saveRDS(df_multi_entrance, here::here("Data_out", "df_multi_entrance.RDS"))
+```

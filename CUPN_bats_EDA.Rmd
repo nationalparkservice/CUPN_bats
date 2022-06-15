@@ -1,0 +1,511 @@
+---
+title: "CUPN bats - EDA of 2016-2021 data"
+author: Ellen Cheng
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    df_print: kable
+    fig_caption: yes
+    highlight: haddock
+    keep_md: yes
+    smart: no
+    theme: journal
+    number_sections: yes
+    toc: yes
+    toc_float: 
+      collapse: true
+    toc_depth: 3
+  html_notebook:
+    chunk_output_type: inline
+  word_document:
+    toc: yes
+    toc_depth: 3
+  pdf_document:
+    df_print: kable
+    highlight: haddock
+    fig_caption: yes
+    keep_tex: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+---
+```{r setup, include = FALSE}
+rm(list=ls())
+
+pkgs <- c("readr", "janitor", "tidyverse", "here", "magrittr", "data.table", "lubridate", "ggthemes", "gridExtra", "grid", "ggforce", "scales", "plotly", "knitr", "DT", "crosstalk")
+installed_pkgs <- pkgs %in% installed.packages()
+if (length(pkgs[!installed_pkgs]) > 0) install.packages(pkgs[!installed_pkgs],dep=TRUE) 
+lapply(pkgs, library, character.only = TRUE)
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, out.width = "100%", cache = FALSE, tidy = TRUE)
+```
+
+```{r functions, include = FALSE}
+FuncPlotCaves <- function(func_dat, multi_entr = FALSE) {
+  # Function to plot counts by cave, colored by method
+  #
+  # Args:
+  #   func_dat: The entrance totals data for a single cave
+  #   multi_entr: Does the cave have multiple entrances?
+  #
+  # Returns:
+  #   Point plot
+  #
+  
+  # Single entrance caves
+  
+  plot_colors <- ggthemes::scale_color_colorblind(name = "Method", limits = sort(unique(df_final$method)))
+  
+  p <- ggplot(data = func_dat, aes(x = event_date, y = summary_maxem, group = method, label = surveyor, label2 = method, label3 = data_quality, label4 = has_data_entry_flag, label5 = infrared_light_used, label6 = human_disturbance, label7 = weather, label8 = wind_strength)) +
+      coord_cartesian(clip = "off") +
+      geom_jitter(aes(shape = total_duration==75, color = method), alpha = 0.6, size = 3, height = 0) +
+      geom_line(aes(group = event_date), linetype = "dotted") +
+      scale_x_date(breaks = seq(lubridate::ymd(paste0(min(func_dat$yr, na.rm = TRUE), "01-01")), lubridate::ymd(paste0(max(func_dat$yr, na.rm = TRUE), "12-31")), "quarters"), limits = c(lubridate::ymd(paste0(min(func_dat$yr, na.rm = TRUE), "01-01")), lubridate::ymd(paste0(max(func_dat$yr, na.rm = TRUE), "12-31")))) +
+      scale_y_continuous(breaks= scales::pretty_breaks(), limits = c(0, NA)) +
+      expand_limits(y = c(0, 10)) + # y-axis maximum must be 10 or higher
+      labs(x = "\nSurvey Date", y = "Maximum Emergence Count\n", title = paste0("Maximum Emergence Counts for ", unique(func_dat$cave), ", by Entrance"), subtitle = "Filled circles are full survey counts; open circles include missing intervals; vertical lines connect same date") +
+      plot_colors + 
+      scale_shape_manual(values = c("FALSE" = 1, "TRUE" = 16), guide = "none") +
+      theme_bw() +
+      theme(axis.text.x = element_text(angle=90)) 
+  
+  if(multi_entr == TRUE) {
+    p <- p +
+      facet_grid(entrance ~ .,)
+  }
+
+  p <- plotly::ggplotly(p)
+  return(p)
+}
+
+FuncDiffEntryExit <- function(func_dat) {
+  # Function to summarize count range by cave, separately  for entry and exit counts
+  #
+  # Args:
+  #   func_dat: The entrance totals data
+  #
+  # Returns:
+  #   Table
+  #
+  
+  # Only using data with full surveys (total_duration = 75)
+  df_min_max <- func_dat %>% 
+    dplyr::filter(total_duration == 75) %>%
+    dplyr::arrange(park, cave, entrance, event_date, method) %>%
+    dplyr::group_by(cave, entrance, event_date) 
+  
+  df_Range <- df_min_max %>%
+    dplyr::mutate(
+      all_methods = paste0(method, collapse = " / "),
+      range_exit_count = paste0(min(summary_exit, na.rm = TRUE), " - ", max(summary_exit, na.rm = TRUE)),
+      diff_exit_count = max(summary_exit, na.rm = TRUE) - min(summary_exit, na.rm = TRUE),
+      range_entry_count = paste0(min(summary_entry, na.rm = TRUE), " - ", max(summary_entry, na.rm = TRUE)),
+      diff_entry_count = max(summary_entry, na.rm = TRUE) - min(summary_entry, na.rm = TRUE),
+      range_maxem = paste0(min(summary_maxem, na.rm = TRUE), " - ", max(summary_maxem, na.rm = TRUE)),
+      diff_maxem = max(summary_maxem, na.rm = TRUE) - min(summary_maxem, na.rm = TRUE),
+    ) %>% 
+    dplyr::select(park, cave, entrance, yr_day, yr, event_date, range_exit_count, diff_exit_count, range_entry_count, diff_entry_count, range_maxem, diff_maxem, all_methods) %>% # present cols in this order
+    dplyr::distinct()
+    
+  # There is a more efficient way to do this but...
+  df_min_entry <- df_min_max %>%
+    dplyr::slice_min(summary_entry, n = 1) %>%
+    dplyr::select(cave, entrance, event_date, method, summary_entry) %>%
+    dplyr::group_by(cave, entrance, event_date) %>%
+    dplyr::mutate(
+      min_entry_method = paste0(method, collapse = " / ")) %>% # show multiple if ties
+    dplyr::select(-method, -summary_entry) %>%
+    dplyr::distinct()
+  
+  df_max_entry <- df_min_max %>%
+    dplyr::slice_max(summary_entry, n = 1) %>%
+    dplyr::select(cave, entrance, event_date, method, summary_entry) %>%
+    dplyr::group_by(cave, entrance, event_date) %>%
+    dplyr::mutate(
+      max_entry_method = paste0(method, collapse = " / ")) %>% # show multiple if ties
+    dplyr::select(-method, -summary_entry) %>%
+    dplyr::distinct()
+  
+  df_min_exit <- df_min_max %>%
+    dplyr::slice_min(summary_exit, n = 1) %>%
+    dplyr::select(cave, entrance, event_date, method, summary_exit) %>%
+    dplyr::group_by(cave, entrance, event_date) %>%
+    dplyr::mutate(
+      min_exit_method = paste0(method, collapse = " / ")) %>% # show multiple if ties
+    dplyr::select(-method, -summary_exit) %>%
+    dplyr::distinct()
+  
+  df_max_exit <- df_min_max %>%
+    dplyr::slice_max(summary_exit, n = 1) %>%
+    dplyr::select(cave, entrance, event_date, method, summary_exit) %>%
+    dplyr::group_by(cave, entrance, event_date) %>%
+    dplyr::mutate(
+      max_exit_method = paste0(method, collapse = " / ")) %>% # show multiple if ties
+    dplyr::select(-method, -summary_exit) %>%
+    dplyr::distinct()
+  
+  df_entry_exit <- plyr::join_all(list(df_Range, df_min_exit, df_max_exit, df_min_entry, df_max_entry), by=c("cave", "entrance", "event_date"), type="full")
+  df_entry_exit$min_entry_method[df_entry_exit$min_entry_method == df_entry_exit$all_methods] <- NA
+  df_entry_exit$max_entry_method[df_entry_exit$max_entry_method == df_entry_exit$all_methods] <- NA
+  df_entry_exit$min_exit_method[df_entry_exit$min_exit_method == df_entry_exit$all_methods] <- NA
+  df_entry_exit$max_exit_method[df_entry_exit$max_exit_method == df_entry_exit$all_methods] <- NA
+  
+  return(df_entry_exit)
+}
+
+FuncIntervalDistrib <- function(func_dat) {
+  # Function to summarize distribution of counts over the 15 intervals of a full survey. For full surveys only. 
+  #
+  # Args:
+  #   func_dat: The final data (by interval)
+  #
+  # Returns:
+  #   Bar plots, faceted by survey night
+  #
+  # Use only method-surveys with full survey duration
+  func_dat %<>% 
+    dplyr::mutate(cave_entrance = paste0(cave, "_", entrance)) 
+  
+  full_surv <- func_dat %>%
+    dplyr::group_by(unique_count) %>%
+      summarize(
+        total_duration = sum(interval_duration)
+        )
+  
+  interval_dat <- func_dat %>%
+    dplyr::left_join(full_surv, by = c("unique_count")) %>%
+    dplyr::filter(total_duration == 75) %>%
+    droplevels()
+  
+  plot_colors <- ggthemes::scale_color_colorblind(name = "Method", limits = sort(unique(interval_dat$method)))
+  
+  p_list <- list()
+  for (i in sort(unique(interval_dat$cave_entrance))) {
+    p <- ggplot(data = interval_dat %>% dplyr::filter(cave_entrance == i), aes(x = interval_number, y = net_count)) +
+      coord_cartesian(clip = "off") +
+      geom_point(aes(color = method), alpha = 0.6, size = 1) +
+      geom_line(aes(color = method, group = surveyor)) +
+      plot_colors + 
+      scale_y_continuous(breaks= scales::pretty_breaks()) +
+      expand_limits(y = c(0, 10)) + # y-axis maximum must be 10 or higher
+      labs(x = "\nInterval", y = "Interval Count (Exit minus Entry)\n", title = paste0("Interval Counts by Survey Date: ", i), subtitle = "Full surveys (75-min) only. Overlapped points may not be visible.") +
+      theme_bw() +
+      theme(legend.position = "top") +
+      facet_wrap(~event_date)
+    
+    p_list[[i]] <- plotly::ggplotly(p)
+  }
+  return(p_list)
+  }
+```
+
+```{r}
+# Read in formatted data
+df_long <- readRDS(here::here("Data_out", "df_long.RDS")) # raw data
+df_final <- readRDS(here::here("Data_out", "df_final.RDS")) # maxem etc., summarized to survey event
+df_multi_entrance <- readRDS(here::here("Data_out", "df_multi_entrance.RDS"))
+```
+
+# Overview of Protocol and Data
+
+## Sampling Frequency
+
+CUPN collects summer emergence count data (between May 15 and July 31) on eight species of cave-dwelling bats that consistently roost in 41 caves across four network parks (MACA, CHCH, CUGA, RUCA). Counts at eight bat maternity caves at Mammoth Cave NP occur between 25 May and 15 June during the period of maximum adult colony size (between late pregnancy and early lactation). Specific sampling dates for each cave are scheduled as close as possible to the same dates each revisit year. Caves with larger bat populations are monitored annually, and the others are monitored on a 4-year revisit design. We have data from 2016 to 2021, with caves sampled at the frequency shown below. NOTE: In 2016, additional sampling was done at a subset of caves to examine within-year patterns in emergence counts (see section 'Special Study in 2016').
+
+CUPN also conducts in-cave bat counts in the winter (Jan. 1 - Feb. 28), using direct visual or photographic techniques to monitor several species of bats that regularly hibernate in 29 caves in the four CUPN parks. Winter counts follow a two-year rotating panel revisit design.
+
+```{r fig.height = 10}
+# Heat map of caves grouped by park, y-axis is day
+dates_n <- df_final %>%
+  dplyr::distinct(park, cave, yr, event_date) %>%
+  dplyr::count(park, cave, yr)
+ggplot(dates_n, aes(x = yr, y = cave)) +
+  geom_tile(aes(fill = n),colour = "white") +
+  scale_y_discrete(limits = rev) +
+  scale_fill_viridis_c(direction = -1, name = "# of survey nights", breaks = seq(min(dates_n$n), max(dates_n$n, by = 1))) +
+  scale_color_manual(values = c("black", "white")) +
+  labs(title = "Bat Summer Emergence Monitoring", subtitle = "Number of bat survey nights per year for each cave", x = "Year", y = "Cave") +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "top",
+        legend.key.width = unit(2.5, "cm"),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  ggforce::facet_col(vars(park), scales = "free_y", space = "free")
+```
+
+## Monitoring Objective
+From the protocol: "Estimate status and trend of summer cave-roosting bat abundance within selected caves in four parks in the Cumberland Piedmont Network during annual and rotating surveys." Status and trend are to be analyzed at the CAVE level.
+
+## Conducting the Counts
+
+From the protocol: "Multiple visit (two or more per sampling window) and multiple observer methods (two or more independent observers or two or more independent methods) will be employed to collect summer bat emergence (“multiple-measures”) data-—this will allow the use of hierarchical models and estimation of detectability and will greatly increase the utility and longevity of the data (Loeb et al. 2015)"
+
+* Typically 2 - 3 survey events (sampling nights) per sampling window. A sampling window is a short period of time, with no more than four days between successive surveys.
+
+* During a survey event, emergence counts are conducted by two or more observers using two or three survey methods. The survey methods are night vision goggles, night vision camera, and thermal infrared camera. Most TYPICALLY, a survey event includes one person using night vision goggles and one or two persons taking video a camera method (if two cameras are used, then one is night vision camera and the other is thermal infrared camera). 
+
+* Some caves have multiple entrances. The protocol states that for these caves, the multiple entrances should be surveyed simultaneously in a survey night. Most TYPICALLY, this is done by having each entrance monitored by one person with night vision goggles and one person taking video using one of the camera methods (so only the night vision goggle method would be replicated across the multiple cave entrances in a survey night).
+
+* Counts are conducted with set start times: 19:45:00 (7:45:00 pm) at MACA and RUCA (central time zone), and 20:45:00 (8:45:00 27 pm) at CHCH and CUGA (eastern time zone).
+
+* A count is a 75-min survey, with counts recorded at 5-min intervals. The 5-min counts are used to calculate a "maximum emergence" statistic. From the protocol: The “maximum emergence” is the highest recorded net emergence (i.e., the total net number of bats out of the cave, that is, the number of bats that have left the cave minus the number of bats that have entered the cave) over a series of time intervals. An estimate of maximum emergence is obtained by calculating the maximum net bats out for each raw-data interval and adding to the net sum of bats for the preceding user defined intervals from that night. This produces the highest maximum emergence estimate for the night using the finest temporal scale available. With shorter time intervals in the raw data, higher values of maximum emergence can often be obtained".
+
+* If less than 4 min. of a 5-min. interval is surveyed, then the interval count is reported as NA. If at least 4 min. surveyed, the count is recorded as if a full interval were surveyed. 
+
+* Video counts are counted back in the office. These counts are similarly broken into 5-min. intervals, and a maximum emergence statistic calculated. Each emergence video is typically evaluated by one person to generate an estimate.
+
+## Special Study in 2016
+
+A 1-year (only) special research project was done by Dr. Emma Wilcox (Univ. Tenn, Knoxville) and techs in which additional emergence counts were done at a subset of eight caves. At each cave, counts were conducted for 3 to 5 nights during one week in each of three sampling periods: 
+
+* Sampling Period 1: Mid-May to mid-June
+
+* Sampling Period 2: Mid-June to mid-July
+
+* Sampling Period 3: Mid-July to mid-August
+
+Sampling methods for this special project were exactly the same as for the regular monitoring that took place at the other regularly scheduled caves/entrances. 
+
+NOTE: This study identified "peak" emergence weeks for each of the eight caves, for that one year of study. It didn't find a significant differences in counts among methods, but indicated that nightly emergence variability within a sampling period and across sampling periods was high.
+
+## Data Analysis
+
+From the protocol: "[The] monitoring objective will be addressed using hierarchical models such as N-mixture (Royle 2004; Kéry et al. 2005; and Kéry and Royle 2010), in the R library called unmarked (Fiske and Chandler 2011), along with the maximum emergence statistic (to control for double-counting individual bats) to obtain abundance estimates (Loeb et al. 2015)...Each visit and each method will be considered independent and not combined during analysis."
+
+## Covariate Data
+
+At the survey-level, CUPN records if counts are considered reliable or not (based on their field notes). In addition, these covariate data are available:
+
+* Human disturbance - yes (1), no (2), or unknown (4) (Note: Does not necessarily mean IMMEDIATE human disturbance. For example, "yes" could mean graffiti on cave walls or caving gear at entrance at time of survey)
+
+* Start/end weather condition - 1 to 7, plus unknown (8). 
+
+* Start/end surface temperature (C) - ambient temperature outside the cave.
+
+* Start/end wind condition - 1 to 6 (higher number means more wind), plus unknown (7).
+
+* Infrared light - was infrared light used during survey? yes (1) or no (2)
+
+# Some Useful (IMHO) Data Summaries
+
+For EDA, I used a subset of data that:
+
+* only includes data rated as "good" quality
+
+* only includes data since 2016, when the protocol was standardized
+
+* omits records with NA for both entry and exit count (I assume these were non-surveys, rather than surveys with no bats detected - CHECK ASSUMPTIONS)
+
+* converts to zero (0) any NA in entry/exit count for which the other count is non-NA
+
+## Many Different Observers
+
+About a quarter of the observers from 2016 - 2021 have at least ~50 emergence counts recorded. It may be possible to use high-frequency observers to understand observer-level biases, but only if method and survey night effects can be disentangled from observer effects (e.g., for emergence videos, have multiple observers independently estimate maxem from the same video).
+
+```{r fig.height = 12}
+ggplot(data = df_final, aes(y = forcats::fct_infreq(surveyor), fill = method)) +
+  geom_bar(position = position_dodge2(preserve = "single")) +
+  labs(y = NULL, x = "# of Survey Events", title = "Distribution of Surveyors by Method") +
+  ggthemes::theme_economist(base_size = 8) +
+  ggthemes::scale_fill_colorblind(name = NULL)
+```
+
+## Total Survey Duration by Method
+
+Thermal infrared camera is least likely to have full 75-min surveys (only 80% of "good quality" surveys were the full 75 min); for night vision camera, 93% were full surveys; for night vision goggles, 92%.
+
+```{r}
+# Total duration by method (for data since 2016, and ONLY using records where data quality reported as "good") ----
+# There may be a couple instances where two different people surveyed with the same method on the same cave-event <<<<<<<<<<<<<<<<<<<<<<<<<<< check for this
+
+df_final %>%
+  dplyr::mutate(total_duration = factor(total_duration, levels = seq(5, 75, by = 5))) %>%
+  tabyl(method, total_duration) %>%
+  # adorn_totals("col") %>%
+  adorn_percentages("row") %>%
+  adorn_pct_formatting(digits = 0) %>%
+  adorn_ns() %>%
+  adorn_title("combined") %>%
+  kable(., caption = "For each survey method (row), the proportion of data records in each level of total survey duration (columns, 5 - 75 minutes). Actual number of data recordes are shown in parentheses. This table only considers data rated as 'good data quality'")
+```
+
+## Missing Entrance Data for Multi-Entrance Caves
+
+Occasionally, data were not available for an entrance during a multi-entrance cave survey (due to technical issues, etc.). Steve has noted all of these instances (N = 10) in his summary notes. It's not clear (yet) how to analyze data for these survey nights.
+
+```{r}
+multi <- df_final %>% 
+  dplyr::filter(cave %in% df_multi_entrance$cave) %>%
+  dplyr::select(cave, event_date, entrance) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(event_date = as.factor(event_date)) %>%
+  janitor::tabyl(event_date, entrance, cave, show_missing_levels = FALSE)
+
+lapply(names(multi), FUN = function(x) {
+  multi[[x]] %>% 
+    tidyr::pivot_longer(cols = !event_date, names_to = "entrance", values_to = "surveyed") %>%
+    dplyr::filter(surveyed == 0) %>%
+    dplyr::mutate(cave = x)}) %>%
+  dplyr::bind_rows(.) %>% 
+  dplyr::select(cave, entrance, event_date) %>%
+  dplyr::arrange(cave, entrance, event_date) %>%
+  DT::datatable(
+    ., 
+    caption = "Survey data were missing at these entrances on these survey dates, for multi-entrance caves",
+    class="compact stripe",
+    rownames= FALSE,
+    extensions = 'Buttons',
+    filter = 'top', 
+    options = list(
+      autoWidth = TRUE,
+      dom = 'Blfrtip',
+      buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+      lengthMenu = list(c(5,15,30,50,-1),
+                        c(5,15,30,50,"All")),
+      pageLength = 5,
+      columnDefs = list(list(className = 'dt_center', targets = "_all"))
+    )
+  )
+
+```
+
+## Entry Counts Exceed Exit Counts
+
+This table shows data records where the number of bats exiting the cave was LESS than the number entering the cave for at least one survey method. In some of these cases, the maxem could undercount the actual number of bats (e.g., if 17 bats exit and 18 enter, net exit would be -1 and maximum emergence could be similarly low depending on the order of exiting/entering bats). There are also cases where net exit is 0 or a very low number because the number of entering bats is almost as high as the number of exiting bats. It's not clear how to treat these data in analyses--should they be considered true emergence events? If we use the maxem estimates, these events will not be distinguishable from survey events in which there truly were only 1 or 2 bats seen all night (then again, these negative net exit counts typically only happen at caves with small numbers of bats so it may not affect model estimates much).
+
+```{r}
+df_final %>%
+  dplyr::filter(summary_net_exit <0) %>%
+  dplyr::select(park, cave, entrance, event_date, method, total_duration, summary_exit, summary_entry, summary_net_exit, summary_maxem) %>%
+  dplyr::arrange(summary_net_exit) %>%
+    DT::datatable(
+    ., 
+    caption = "Data records with a negative net exit count (i.e., number of bats entering was greater than number exiting during a survey event). In this table, summary counts are summed over the full survey): summary_exit = total # exiting, summary_entry = total # entering, summary_net_exit = exiting minus entering, summary_maxem = maximum emergence statistic.",
+    class="compact stripe",
+    rownames= FALSE,
+    extensions = 'Buttons',
+    filter = 'top', 
+    options = list(
+      autoWidth = TRUE,
+      dom = 'Blfrtip',
+      buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+      lengthMenu = list(c(5,15,30,50,-1),
+                        c(5,15,30,50,"All")),
+      pageLength = 5,
+      columnDefs = list(list(className = 'dt_center', targets = "_all"))
+    )
+  )
+```
+  
+## Differences in Counts Among Survey Methods
+
+There are some instances of huge differences among methods (absolute differences, so also need to consider differences as a proportion of mean count) during a single survey event. It would be useful to check back in the data for notes that may warrant excluding some of the data. There are a couple cases where night goggle counts recorded way more entering bats than video-based counts did, for example--could this be because bats are primarily entering caves from the sides (edges) of the cave holes and the video cameras are not getting a good view of these edges? Examining these records (esp. data notes) may help identify conditions that lead to large differences in counts among methods--possibly helpful for reducing these occurrences in the future.
+
+```{r}
+FuncDiffEntryExit(func_dat = df_final) %>%
+  dplyr::select(park, cave, entrance, event_date, all_methods, range_exit_count, range_entry_count, range_maxem, diff_maxem, min_exit_method, max_exit_method, min_entry_method, max_entry_method) %>%
+  dplyr::arrange(desc(diff_maxem)) %>%
+  DT::datatable(
+    ., 
+    caption = "Range of emergence estimates across methods. Data are sorted decending by diff_maxem, which is the difference between the highest and lowest maximum emergence statistic for that survey event.",
+    class="compact stripe",
+    rownames= FALSE,
+    extensions = 'Buttons',
+    filter = 'top', 
+    options = list(
+      autoWidth = TRUE,
+      dom = 'Blfrtip',
+      buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+      lengthMenu = list(c(5,15,30,50,-1),
+                        c(5,15,30,50,"All")),
+      pageLength = 5,
+      columnDefs = list(list(className = 'dt_center', targets = "_all"))
+    )
+  )
+```
+
+## Difference in Maxem Counts Across Survey Nights in a Year
+
+Month/week/day of survey sometimes made a HUGE difference in emergence counts. For these caves, it seems particularly important to conduct surveys across multiple nights to get a good estimate of average nightly emergence and a measure of the variability in nightly emergence (also to identify event-level predictors). Year-to-year trends may be masked by variation in nightly emergence, if sample sizes (# of survey nights w/in a sampling window) are low. Three examples below:
+
+NOTE: In these figures, open circles (TRUE, in legend) mean the full 75-min was surveyed (no missing 5-min intervals, though there could have been some partial 5-min intervals, i.e., at least 4 of the 5 min. surveyed)
+
+### Luna Cave
+July 2016 counts were much higher than any other counts. It seems June is the typical sampling month for this cave, so the high July counts were only reported because of the special 2016 study. If monitoring should be targeting the peak emergence counts within a year, it may be useful to further evaluate if counts should be conducted in July for Luna Cave.
+
+In July 2016, the nightly counts within a 3-day sampling window ranged from ~190 on 7/5/2016 to ~240 on 7/8/2016.
+
+On 6/13/2019, thermal infrared camera and night vision camera maxem = 1 and night vision goggles maxem = 60.
+
+```{r}
+FuncPlotCaves(func_dat = subset(df_final, cave == "Luna Cave"))
+```
+
+These figures show the 5-min net exit counts across the 15 (5-min) survey intervals of a sampling event. The survey on 7/5/2016 seems(?) to have ended before the emergence event was really over (this night had a high maxem, which may have still been an undercount).
+
+```{r fig.height = 10}
+FuncIntervalDistrib(func_dat = subset(df_long, cave == "Luna Cave"))$`Luna Cave_(only entrance to cave)`
+```
+
+### Long Cave 
+
+These data show some considerable night-to-night variation in a sampling period. The night vision camera estimate for 7/17/2018 is also much higher than for other methods--from notes, it's not clear why the discrepancy, but it may be worth getting additional independent counts of the video data in cases like this.
+
+```{r}
+FuncPlotCaves(func_dat = subset(df_final, cave == "Long Cave"))
+```
+
+These figures show the 5-min net exit counts across the 15 (5-min) survey intervals of a sampling event. On several nights in 2016, the survey seems to have ended before the emergence event was really over.
+
+```{r fig.height = 10}
+FuncIntervalDistrib(func_dat = subset(df_long, cave == "Long Cave"))$`Long Cave_(only entrance to cave)`
+```
+
+### Historic Entrance
+
+These data show a fair bit (but not too bad) of night-to-night variation in a sampling period. In some survey nights, the methods seemed to differ a fair bit in maxem estimates.
+
+```{r}
+FuncPlotCaves(func_dat = subset(df_final, cave == "Historic Entrance"))
+```
+
+These figures show the 5-min net exit counts across the 15 (5-min) survey intervals of a sampling event. 
+```{r fig.height = 10}
+FuncIntervalDistrib(func_dat = subset(df_long, cave == "Historic Entrance"))$`Historic Entrance_(only entrance to cave)`
+```
+
+
+# Sampling & Data Considerations (based on EDA of 2016 - 2021 data)
+
+* Starting and ending emergence counts at set times of night can lead to premature termination of emergence counts (i.e., counts ending while relatively large numbers of bats are still exiting the cave) and therefore an undercount of the emergence. We also can expect emergence start and end times may gradually shift over time or even on a nightly basis due to changing weather, etc. conditions. Consider how to deal with data from surveys that (apparently) end prematurely, or (preferably) adjust the sampling protocol to minimize this. 
+
+* When 5-min interval counts are incomplete (i.e., bats are not counted for part of a 5-min interval), record the number of minutes (out of 5) that sampling was actually conducted so incomplete intervals can (potentially) be accounted for in analyses. Otherwise, we have additional un-modeled heterogeneity that increases data noise and reduces ability to detect trends.
+
+* At caves with high variability in night-to-night emergence counts, increase the number of survey events in a sampling window, to obtain a better estimate of average nightly emergence and potentially identification of event-level covariates for emergence. Be strategic in which caves you increase sampling at--caves with larger bat populations and greater night-to-night variability should be a high priority for increased sampling.
+
+* Especially when emergence counts are high, having multiple observers independently estimate counts from an emergence video can improve precision of video-based estimates and provide estimates of observer variability that can assist model estimation (though bias due to camera placement, etc. may still exist).
+
+* Find ways to increase replication of counts while reducing (confounding) sources of variability. When the three counts in a survey night differ in both observer and method (i.e., each observer uses a different method) it is difficult to disentangle (and therefore account for) observer vs. method effects in the estimation model. Consider these ways to obtain replicate counts while reducing sources of variability:
+
++ Instead of three observers using three methods, have two to three observers use night vision goggles and have those SAME observers provide independent counts of a night vision camera video of that same emergence event. This will give us replicate counts for each method (differing only by observer) and replicate counts for each method (differing only by method)--making it more feasible to account for variability in counts due to observers and methods. (I say night vision camera instead of thermal infrared only because it seems the infrared camera is more likely to have technical issues that lead to data loss--but there may be advantages of thermal infrared that make it the better choice)
+
++ If three observers are making counts on a survey night, try to ensure at least two of the observers are more "experienced/trained" observers (e.g., two experienced observers with night vision goggles). This should reduce noise in the data and increase our ability to evaluate observer effects (larger sample sizes per observer).  
+
+# Appendix of Interactive Graphs and Tables
+
+```{r}
+# Convert to shared data class to allow user selection. The 'group' argument allows both data frames to be selected with a single filter
+shared_df_final <- SharedData$new(df_final, ~cave, group = "select_by_cave") 
+shared_df_long <- SharedData$new(df_long, ~cave, group = "select_by_cave")
+
+crosstalk::filter_select(id = "sel_cave", label = "Select a cave", sharedData = shared_df_final, multiple = FALSE, group = ~cave)
+```
+
+```{r}
+# FuncPlotCaves(func_dat = shared_df_final, multi_entr = unique(shared_df_final$cave) %in% df_multi_entrance$cave)
+FuncTest(shared_df_final)
+```
+
+## Distribution of Net (Exit - Entry) Counts Across Survey Intervals
+```{r fig.height = 6}
+# FuncIntervalDistrib(func_dat = shared_df_final)
+```
